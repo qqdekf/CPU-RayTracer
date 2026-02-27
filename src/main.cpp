@@ -6,20 +6,21 @@
 #include "geometry.h"
 #include <algorithm>
 
-//光源
-struct Light {
+// 光源
+struct Light
+{
     Light(const Vec3f &p, const float &i) : position(p), intensity(i) {}
-    Vec3f position;//光源位置
-    float intensity;//光源强度
+    Vec3f position;  // 光源位置
+    float intensity; // 光源强度
 };
 // 材质
 struct Material
 {
     Material(const Vec2f &albedo, const Vec3f &color, const float &spec) : albedo(albedo), diffuse_color(color), specular_exponent(spec) {}
-    Material() : albedo(1,0), diffuse_color(), specular_exponent() {}
-    Vec2f albedo;//反照率
-    float specular_exponent;//镜面光照
-    Vec3f diffuse_color; // 漫反射光照颜色
+    Material() : albedo(1, 0), diffuse_color(), specular_exponent() {}
+    Vec2f albedo;            // 反照率
+    float specular_exponent; // 镜面光照
+    Vec3f diffuse_color;     // 漫反射光照颜色
 };
 
 // 球体
@@ -52,11 +53,11 @@ struct Sphere
     }
 };
 
-//反射光函数,I为入射光，N为法向量
-Vec3f reflect(const Vec3f &I, const Vec3f &N) 
+// 反射光函数,I为入射光，N为法向量
+Vec3f reflect(const Vec3f &I, const Vec3f &N)
 {
-    //平行四边形法则，N为法向量I*N为入射光投影
-    return I - N*2.f*(I*N);
+    // 平行四边形法则，N为法向量I*N为入射光投影
+    return I - N * 2.f * (I * N);
 }
 
 // 场景球体相交判断，orig为视点，dir为方向，spheres球体数组,hit为交点，N为交点指向球心的方向向量
@@ -78,26 +79,54 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
     return spheres_dist < 1000;
 }
 // 片段颜色计算函数，orig为视点，dir为方向，spheres球体数组
-Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights) 
+Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights)
 {
-    Vec3f point, N;//交点与法向量
+    Vec3f point, N; // 交点与法向量
     Material material;
-  
+
     if (!scene_intersect(orig, dir, spheres, point, N, material))
     {
         return Vec3f(0.2, 0.7, 0.8); // background color
     }
-    float diffuse_light_intensity = 0, specular_light_intensity = 0;//设置光照强度
-    for (size_t i=0; i<lights.size(); i++) {
-        Vec3f light_dir      = (lights[i].position - point).normalize();//入射光方向向量
-        diffuse_light_intensity  += lights[i].intensity * std::max(0.f, light_dir*N);//光照强度乘以入射光向量与法向向量的内积=漫反射强度
-        specular_light_intensity += powf(std::max(0.f, -reflect(-light_dir, N)*dir), material.specular_exponent)*lights[i].intensity;//反射光与相机射线点乘的specular_exponent的幂乘以光强
+    float diffuse_light_intensity = 0, specular_light_intensity = 0; // 设置光照强度
+    for (size_t i = 0; i < lights.size(); i++)
+    {
+        Vec3f light_dir = (lights[i].position - point).normalize(); // 入射光方向向量
+        float light_distance = (lights[i].position - point).norm(); // 光线的模即距离
+        // 光线追踪（Ray Tracing）中用于生成“阴影射线起点”（shadow ray origin）的经典技巧，目的是避免自相交（self-intersection）。
+        // 1. 背景：为什么需要 shadow_orig？
+        // 在计算某点 point 是否被光源照亮时，我们会从该点向光源发射一条 阴影射线（shadow ray）。
+        // 如果这条射线在到达光源前碰到其他物体 → 说明 point 在阴影中。
+        // 问题：由于浮点精度误差，阴影射线可能立即与当前表面再次相交（即“自相交”），导致错误地认为自己在阴影里（即使没有遮挡）。
+        // 2. 解决方案：沿法线方向偏移起点
+        // 将射线起点从 point 沿着表面法线 N 微微移动一点（如 1e-3），使其“离开”表面。
+        // 这样可避免与当前三角形/球体等自身相交。
+        // 3.如果 dot(light_dir, N) < 0：
+        // 说明 光源在表面背面（因为法线通常指向外，而 light_dir 指向光源）。
+        // 此时应向法线反方向偏移（即 point - N * ε），因为表面“背面”才是外部空间。
+        // 否则（>= 0）：
+        // 光源在表面正面 → 向法线正方向偏移（point + N * ε）。
+        // ❗ 但注意：light_dir 的定义方向很重要！
+        // 如果 light_dir = light_pos - point（从着色点指向光源）✅ → 上述逻辑正确。
+        // 4. 偏移量 1e-3 的选择
+        // 太小（如 1e-10）→ 仍可能自相交（浮点误差）。
+        // 太大（如 0.1）→ 可能跳过薄物体，产生“阴影泄漏”（shadow acne 或 peter panning）。
+        // 经验值：1e-3 ~ 1e-4 对大多数场景有效。
+        // 更高级方法：使用 ray epsilon based on geometry scale（根据场景大小动态调整）。
+        Vec3f shadow_orig = light_dir * N < 0 ? point - N * 1e-3 : point + N * 1e-3; // 检查该点是否light[i]在阴影下面
+        Vec3f shadow_pt, shadow_N;                                                       // 阴影射线（阴影点到）与球体的交点，阴影法向量
+        Material tmpmaterial;                                                            // 材质
+        // 阴影点位置向量shadow_orig，从point点到光源的光线方向向量light_dir，计算交点，有交点且点不在光源背后（到交点小于光线的模），即为阴影点
+        if (scene_intersect(shadow_orig, light_dir, spheres, shadow_pt, shadow_N, tmpmaterial) && (shadow_pt - shadow_orig).norm() < light_distance)
+            continue;//存在阴影则直接跳过漫反射与镜面高光的计算，环境光放入漫反射中
+        diffuse_light_intensity += lights[i].intensity * std::max(0.f, light_dir * N);                                                    // 光照强度乘以入射光向量与法向向量的内积=漫反射强度
+        specular_light_intensity += powf(std::max(0.f, -reflect(-light_dir, N) * dir), material.specular_exponent) * lights[i].intensity; // 反射光与相机射线点乘的specular_exponent的幂乘以光强
     }
-    //光线的漫反射强度（材质漫反射颜色乘以入射光向量与法向向量点乘结果）+镜面高光（白色光乘以镜面光强）,albedo反照率，[0]漫反射，[1]镜面
-    return material.diffuse_color * diffuse_light_intensity* material.albedo[0] + Vec3f(1., 1., 1.)*specular_light_intensity * material.albedo[1];
+    // 光线的漫反射强度（材质漫反射颜色乘以入射光向量与法向向量点乘结果）+镜面高光（白色光乘以镜面光强）,albedo反照率，[0]漫反射，[1]镜面
+    return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.) * specular_light_intensity * material.albedo[1];
 }
-//渲染函数
-void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights) 
+// 渲染函数
+void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights)
 {
     // 图像像数
     const int width = 1024;
@@ -118,48 +147,55 @@ void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights
             float x = (2 * (i + 0.5) / (float)width - 1) * tan(fov / 2.) * width / (float)height; // 标准化成1x1x1的立方体，需要乘以宽高比
             float y = -(2 * (j + 0.5) / (float)height - 1) * tan(fov / 2.);                       // 高度为单位长度进行缩放，屏幕空间y轴向下，取负值
             Vec3f dir = Vec3f(x, y, -1).normalize();                                              // 相机方向向量，-1为屏幕所在位置，标准化方向向量
-            framebuffer[i+j*width] = cast_ray(Vec3f(0,0,0), dir, spheres, lights);                 // 原点作为相机坐标，求球体射线相交
+            framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, spheres, lights);          // 原点作为相机坐标，求球体射线相交
         }
     }
     std::ofstream ofs("output/out.ppm", std::ios::binary);
-    //检查是否打开成功
-    if (!ofs.is_open()) {
+    // 检查是否打开成功
+    if (!ofs.is_open())
+    {
         std::cerr << "Failed to create out.ppm\n";
         return;
     }
     ofs << "P6\n"
         << width << " " << height << "\n255\n";
     // 检查 header 是否写入成功
-    if (!ofs.good()) {
+    if (!ofs.good())
+    {
         std::cerr << "Failed to write PPM header\n";
         return;
     }
-    for (size_t i = 0; i < height * width; ++i) {
+    for (size_t i = 0; i < height * width; ++i)
+    {
         unsigned char pixel[3];
-        //颜色值不能超过1.0f
+        // 颜色值不能超过1.0f
         float max = std::max(pixel[0], std::max(pixel[1], pixel[2]));
-        if (max>1)
+        if (max > 1)
         {
-            pixel[0] = pixel[0]*(1./max);
-            pixel[1] = pixel[1]*(1./max);
-            pixel[2] = pixel[2]*(1./max);
+            pixel[0] = pixel[0] * (1. / max);
+            pixel[1] = pixel[1] * (1. / max);
+            pixel[2] = pixel[2] * (1. / max);
         }
         pixel[0] = (unsigned char)(255 * std::clamp(framebuffer[i][0], 0.0f, 1.0f));
         pixel[1] = (unsigned char)(255 * std::clamp(framebuffer[i][1], 0.0f, 1.0f));
         pixel[2] = (unsigned char)(255 * std::clamp(framebuffer[i][2], 0.0f, 1.0f));
-        
-        ofs.write(reinterpret_cast<const char*>(pixel), 3);
-        //检查是否写入失败
-        if (!ofs.good()) {
+
+        ofs.write(reinterpret_cast<const char *>(pixel), 3);
+        // 检查是否写入失败
+        if (!ofs.good())
+        {
             std::cerr << "Write error at pixel " << i << "\n";
             break;
         }
     }
-    //检查是否关闭成功
+    // 检查是否关闭成功
     ofs.close();
-    if (ofs.fail()) {
+    if (ofs.fail())
+    {
         std::cerr << "Error during file close (e.g., disk full)\n";
-    } else {
+    }
+    else
+    {
         std::cout << "Image successfully saved to out.ppm\n";
     }
 }
@@ -227,19 +263,19 @@ int main()
 {
     // 场景设置
     // 材质类型
-    Material      ivory(Vec2f(0.6,  0.3), Vec3f(0.4, 0.4, 0.3),   50.);
-    Material red_rubber(Vec2f(0.9,  0.1), Vec3f(0.3, 0.1, 0.1),   10.);
+    Material ivory(Vec2f(0.6, 0.3), Vec3f(0.4, 0.4, 0.3), 50.);
+    Material red_rubber(Vec2f(0.9, 0.1), Vec3f(0.3, 0.1, 0.1), 10.);
     // 场景球体组合
     std::vector<Sphere> spheres;
     spheres.push_back(Sphere(Vec3f(-3, 0, -16), 2, ivory));
     spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2, red_rubber));
     spheres.push_back(Sphere(Vec3f(1.5, -0.5, -18), 3, red_rubber));
-    spheres.push_back(Sphere(Vec3f(7, 5, -18), 4, ivory));  
-    //光线
-    std::vector<Light>  lights;
-    lights.push_back(Light(Vec3f(-20, 20,  20), 1.5));
-    lights.push_back(Light(Vec3f( 30, 50, -25), 1.8));
-    lights.push_back(Light(Vec3f( 30, 20,  30), 1.7));
+    spheres.push_back(Sphere(Vec3f(7, 5, -18), 4, ivory));
+    // 光线
+    std::vector<Light> lights;
+    lights.push_back(Light(Vec3f(-20, 20, 20), 1.5));
+    lights.push_back(Light(Vec3f(30, 50, -25), 1.8));
+    lights.push_back(Light(Vec3f(30, 20, 30), 1.7));
     // 渲染函数
     render(spheres, lights);
 
