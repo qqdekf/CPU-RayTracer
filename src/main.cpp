@@ -15,9 +15,11 @@ struct Light {
 // 材质
 struct Material
 {
-    Material(const Vec3f &color) : diffuse_color(color) {}
-    Material() : diffuse_color() {}
-    Vec3f diffuse_color; // 材质漫反射颜色
+    Material(const Vec2f &albedo, const Vec3f &color, const float &spec) : albedo(albedo), diffuse_color(color), specular_exponent(spec) {}
+    Material() : albedo(1,0), diffuse_color(), specular_exponent() {}
+    Vec2f albedo;//反照率
+    float specular_exponent;//镜面光照
+    Vec3f diffuse_color; // 漫反射光照颜色
 };
 
 // 球体
@@ -50,6 +52,13 @@ struct Sphere
     }
 };
 
+//反射光函数,I为入射光，N为法向量
+Vec3f reflect(const Vec3f &I, const Vec3f &N) 
+{
+    //平行四边形法则，N为法向量I*N为入射光投影
+    return I - N*2.f*(I*N);
+}
+
 // 场景球体相交判断，orig为视点，dir为方向，spheres球体数组,hit为交点，N为交点指向球心的方向向量
 bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, Vec3f &hit, Vec3f &N, Material &material)
 {
@@ -78,12 +87,14 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
     {
         return Vec3f(0.2, 0.7, 0.8); // background color
     }
-    float diffuse_light_intensity = 0;
+    float diffuse_light_intensity = 0, specular_light_intensity = 0;//设置光照强度
     for (size_t i=0; i<lights.size(); i++) {
         Vec3f light_dir      = (lights[i].position - point).normalize();//入射光方向向量
         diffuse_light_intensity  += lights[i].intensity * std::max(0.f, light_dir*N);//光照强度乘以入射光向量与法向向量的内积=漫反射强度
+        specular_light_intensity += powf(std::max(0.f, -reflect(-light_dir, N)*dir), material.specular_exponent)*lights[i].intensity;//反射光与相机射线点乘的specular_exponent的幂乘以光强
     }
-    return material.diffuse_color * diffuse_light_intensity;//光线的漫反射强度（材质颜色乘以入射光向量与法向向量点乘结果）
+    //光线的漫反射强度（材质漫反射颜色乘以入射光向量与法向向量点乘结果）+镜面高光（白色光乘以镜面光强）,albedo反照率，[0]漫反射，[1]镜面
+    return material.diffuse_color * diffuse_light_intensity* material.albedo[0] + Vec3f(1., 1., 1.)*specular_light_intensity * material.albedo[1];
 }
 //渲染函数
 void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights) 
@@ -110,18 +121,47 @@ void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights
             framebuffer[i+j*width] = cast_ray(Vec3f(0,0,0), dir, spheres, lights);                 // 原点作为相机坐标，求球体射线相交
         }
     }
-    std::ofstream ofs("out.ppm", std::ios::binary);
+    std::ofstream ofs("output/out.ppm", std::ios::binary);
+    //检查是否打开成功
+    if (!ofs.is_open()) {
+        std::cerr << "Failed to create out.ppm\n";
+        return;
+    }
     ofs << "P6\n"
         << width << " " << height << "\n255\n";
-    for (size_t i = 0; i < height * width; ++i)
-    {
-        unsigned char pixel[3];
-        pixel[0] = (unsigned char)(255 * std::clamp(framebuffer[i][0], 0.0f, 1.0f)); // R
-        pixel[1] = (unsigned char)(255 * std::clamp(framebuffer[i][1], 0.0f, 1.0f)); // G
-        pixel[2] = (unsigned char)(255 * std::clamp(framebuffer[i][2], 0.0f, 1.0f)); // B
-        ofs.write(reinterpret_cast<const char *>(pixel), 3);
+    // 检查 header 是否写入成功
+    if (!ofs.good()) {
+        std::cerr << "Failed to write PPM header\n";
+        return;
     }
+    for (size_t i = 0; i < height * width; ++i) {
+        unsigned char pixel[3];
+        //颜色值不能超过1.0f
+        float max = std::max(pixel[0], std::max(pixel[1], pixel[2]));
+        if (max>1)
+        {
+            pixel[0] = pixel[0]*(1./max);
+            pixel[1] = pixel[1]*(1./max);
+            pixel[2] = pixel[2]*(1./max);
+        }
+        pixel[0] = (unsigned char)(255 * std::clamp(framebuffer[i][0], 0.0f, 1.0f));
+        pixel[1] = (unsigned char)(255 * std::clamp(framebuffer[i][1], 0.0f, 1.0f));
+        pixel[2] = (unsigned char)(255 * std::clamp(framebuffer[i][2], 0.0f, 1.0f));
+        
+        ofs.write(reinterpret_cast<const char*>(pixel), 3);
+        //检查是否写入失败
+        if (!ofs.good()) {
+            std::cerr << "Write error at pixel " << i << "\n";
+            break;
+        }
+    }
+    //检查是否关闭成功
     ofs.close();
+    if (ofs.fail()) {
+        std::cerr << "Error during file close (e.g., disk full)\n";
+    } else {
+        std::cout << "Image successfully saved to out.ppm\n";
+    }
 }
 void render()
 {
@@ -187,8 +227,8 @@ int main()
 {
     // 场景设置
     // 材质类型
-    Material ivory(Vec3f(0.4, 0.4, 0.3));
-    Material red_rubber(Vec3f(0.3, 0.1, 0.1));
+    Material      ivory(Vec2f(0.6,  0.3), Vec3f(0.4, 0.4, 0.3),   50.);
+    Material red_rubber(Vec2f(0.9,  0.1), Vec3f(0.3, 0.1, 0.1),   10.);
     // 场景球体组合
     std::vector<Sphere> spheres;
     spheres.push_back(Sphere(Vec3f(-3, 0, -16), 2, ivory));
@@ -198,6 +238,8 @@ int main()
     //光线
     std::vector<Light>  lights;
     lights.push_back(Light(Vec3f(-20, 20,  20), 1.5));
+    lights.push_back(Light(Vec3f( 30, 50, -25), 1.8));
+    lights.push_back(Light(Vec3f( 30, 20,  30), 1.7));
     // 渲染函数
     render(spheres, lights);
 

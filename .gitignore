@@ -3,6 +3,7 @@ build/
 lib/
 data/
 bin/
+output/
 *.dll
 *.lib
 *.so
