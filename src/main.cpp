@@ -16,9 +16,10 @@ struct Light
 // 材质
 struct Material
 {
-    Material(const Vec3f &albedo, const Vec3f &color, const float &spec) : albedo(albedo), diffuse_color(color), specular_exponent(spec) {}
-    Material() : albedo(1, 0, 0), diffuse_color(), specular_exponent() {}
-    Vec3f albedo;            // 反照率,0漫反射，1镜面反射，2反射率
+    Material(const float &r, const Vec4f &a, const Vec3f &color, const float &spec) : refractive_index(r), albedo(a), diffuse_color(color), specular_exponent(spec) {}
+    Material() : refractive_index(1), albedo(1, 0, 0, 0), diffuse_color(), specular_exponent() {}
+    float refractive_index;  // 折射系数
+    Vec4f albedo;            // 反照率,0漫反射，1镜面反射，2反射率,3折射率
     float specular_exponent; // 镜面光照
     Vec3f diffuse_color;     // 漫反射光照颜色
 };
@@ -59,7 +60,27 @@ Vec3f reflect(const Vec3f &I, const Vec3f &N)
     // 平行四边形法则，N为法向量I*N为入射光投影
     return I - N * 2.f * (I * N);
 }
-
+// 折射函数，I为入射光，N为法向量，折射率，实现了 基于斯涅尔定律（Snell's Law）的光线折射方向计算
+Vec3f refract(const Vec3f &I, const Vec3f &N, const float &refractive_index)
+{ // Snell's law
+    float cosi = -std::clamp(I * N, -1.0f, 1.0f);
+    // 求解法向量与入射光单位向量的cos,I向内，N向外，取负变为相同方向
+    float etai = 1, etat = refractive_index; // 入射光折射率即空气折射率，出射光折射率=介质折射率
+    Vec3f n = N;                             // 指向外部的法向量
+    // 当 cosi < 0（即 I·N > 0），说明光线从物体内部射向外部。
+    // 此时需交换入射/透射介质的折射率，并反转法线方向（使 n 始终指向入射侧）。
+    if (cosi < 0)
+    {                          // if the ray is inside the object, swap the indices and invert the normal to get the correct result
+        cosi = -cosi;          // 取正
+        std::swap(etai, etat); // 从内部发射，交换折射率
+        n = -N;
+    }
+    // 计算折射系数和判别式
+    float eta = etai / etat;                                               // 折射比
+    float k = 1 - eta * eta * (1 - cosi * cosi);                           // 折射光公式
+    return k < 0 ? Vec3f(0, 0, 0) : I * eta + n * (eta * cosi - sqrtf(k)); // k<0为全反射，无折射光，返回零向量（调用者需处理，如转为反射）。否则按公式计算折射方向。
+    // return normalize(T); // 返回单位向量（重要！）
+}
 // 场景球体相交判断，orig为视点，dir为方向，spheres球体数组,hit为交点，N为交点指向球心的方向向量
 bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, Vec3f &hit, Vec3f &N, Material &material)
 {
@@ -92,8 +113,12 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
     Vec3f reflect_dir = reflect(dir, N).normalize();                                       // 反射光线
     Vec3f reflect_orig = reflect_dir * N < 0 ? point - N * 1e-3 : point + N * 1e-3;        // 偏移量避免自交
     Vec3f reflect_color = cast_ray(reflect_orig, reflect_dir, spheres, lights, depth + 1); // 递归计算片段颜色，递归深度关系反射强度
+    // 折射
+    Vec3f refract_dir = refract(dir, N, material.refractive_index).normalize();            // 计算折射光反向
+    Vec3f refract_orig = refract_dir * N < 0 ? point - N * 1e-3 : point + N * 1e-3;        // 偏移量避免自交
+    Vec3f refract_color = cast_ray(refract_orig, refract_dir, spheres, lights, depth + 1); // 递归计算片段颜色，递归深度关系反射强度
 
-    float diffuse_light_intensity = 0, specular_light_intensity = 0; // 设置光照强度
+    float diffuse_light_intensity = 0, specular_light_intensity = 0; // 设置漫反射与镜面反射光照强度
     for (size_t i = 0; i < lights.size(); i++)
     {
         Vec3f light_dir = (lights[i].position - point).normalize(); // 入射光方向向量
@@ -127,8 +152,8 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
         diffuse_light_intensity += lights[i].intensity * std::max(0.f, light_dir * N);                                                    // 光照强度乘以入射光向量与法向向量的内积=漫反射强度
         specular_light_intensity += powf(std::max(0.f, -reflect(-light_dir, N) * dir), material.specular_exponent) * lights[i].intensity; // 反射光与相机射线点乘的specular_exponent的幂乘以光强
     }
-    // 光线的漫反射强度（材质漫反射颜色乘以入射光向量与法向向量点乘结果）+镜面高光（白色光乘以镜面光强）,+反射光（反射颜色×反照率），albedo反照率，[0]漫反射，[1]镜面,[2]反射
-    return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.) * specular_light_intensity * material.albedo[1] + reflect_color * material.albedo[2];
+    // 光线的漫反射强度（材质漫反射颜色乘以入射光向量与法向向量点乘结果）+镜面高光（白色光乘以镜面光强）,+反射光（反射颜色×反照率），albedo反照率，[0]漫反射，[1]镜面,[2]反射。[3]折射
+    return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.) * specular_light_intensity * material.albedo[1] + reflect_color * material.albedo[2] + refract_color * material.albedo[3];
 }
 // 渲染函数
 void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights)
@@ -268,15 +293,16 @@ int main()
 {
     // 场景设置
     // 材质类型
-    Material ivory(Vec3f(0.6, 0.3, 0.1), Vec3f(0.4, 0.4, 0.3), 50.);//有微弱反射
-    Material red_rubber(Vec3f(0.9, 0.1, 0.0), Vec3f(0.3, 0.1, 0.1), 10.);//无反射
-    Material mirror(Vec3f(0.0, 10.0, 0.8), Vec3f(1.0, 1.0, 1.0), 1425.);//镜面高光幂指数大，漫反射白光强度也大，且反射率也大
+    Material ivory(1.0, Vec4f(0.6, 0.3, 0.1, 0.0), Vec3f(0.4, 0.4, 0.3), 50.);      // 有微弱反射，无折射
+    Material glass(1.5, Vec4f(0.0, 0.5, 0.1, 0.8), Vec3f(0.6, 0.7, 0.8), 125.);     // 玻璃材质有折射
+    Material red_rubber(1.0, Vec4f(0.9, 0.1, 0.0, 0.0), Vec3f(0.3, 0.1, 0.1), 10.); // 无反射
+    Material mirror(1.0, Vec4f(0.0, 10.0, 0.8, 0.0), Vec3f(1.0, 1.0, 1.0), 1425.);  // 镜面高光幂指数大，漫反射白光强度也大，且反射率也大
     // 场景球体组合
     std::vector<Sphere> spheres;
-    spheres.push_back(Sphere(Vec3f(-3,    0,   -16), 2,      ivory));
-    spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2,      mirror));
-    spheres.push_back(Sphere(Vec3f( 1.5, -0.5, -18), 3, red_rubber));
-    spheres.push_back(Sphere(Vec3f( 7,    5,   -18), 4,     mirror));
+    spheres.push_back(Sphere(Vec3f(-3, 0, -16), 2, ivory));
+    spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2, glass));
+    spheres.push_back(Sphere(Vec3f(1.5, -0.5, -18), 3, red_rubber));
+    spheres.push_back(Sphere(Vec3f(7, 5, -18), 4, mirror));
     // 光线
     std::vector<Light> lights;
     lights.push_back(Light(Vec3f(-20, 20, 20), 1.5));
