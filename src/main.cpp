@@ -16,9 +16,9 @@ struct Light
 // 材质
 struct Material
 {
-    Material(const Vec2f &albedo, const Vec3f &color, const float &spec) : albedo(albedo), diffuse_color(color), specular_exponent(spec) {}
-    Material() : albedo(1, 0), diffuse_color(), specular_exponent() {}
-    Vec2f albedo;            // 反照率
+    Material(const Vec3f &albedo, const Vec3f &color, const float &spec) : albedo(albedo), diffuse_color(color), specular_exponent(spec) {}
+    Material() : albedo(1, 0, 0), diffuse_color(), specular_exponent() {}
+    Vec3f albedo;            // 反照率,0漫反射，1镜面反射，2反射率
     float specular_exponent; // 镜面光照
     Vec3f diffuse_color;     // 漫反射光照颜色
 };
@@ -78,16 +78,21 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
     }
     return spheres_dist < 1000;
 }
-// 片段颜色计算函数，orig为视点，dir为方向，spheres球体数组
-Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights)
+// 片段颜色计算函数，orig为相机位置或者射线出发点，dir为相机射线方向，spheres球体数组,depth递归深度
+Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights, size_t depth = 0)
 {
     Vec3f point, N; // 交点与法向量
     Material material;
-
-    if (!scene_intersect(orig, dir, spheres, point, N, material))
+    // 如果递归深度大于四或射线不相交，设置递归深度为4
+    if (depth > 4 || !scene_intersect(orig, dir, spheres, point, N, material))
     {
         return Vec3f(0.2, 0.7, 0.8); // background color
     }
+    // 反射
+    Vec3f reflect_dir = reflect(dir, N).normalize();                                       // 反射光线
+    Vec3f reflect_orig = reflect_dir * N < 0 ? point - N * 1e-3 : point + N * 1e-3;        // 偏移量避免自交
+    Vec3f reflect_color = cast_ray(reflect_orig, reflect_dir, spheres, lights, depth + 1); // 递归计算片段颜色，递归深度关系反射强度
+
     float diffuse_light_intensity = 0, specular_light_intensity = 0; // 设置光照强度
     for (size_t i = 0; i < lights.size(); i++)
     {
@@ -114,16 +119,16 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
         // 经验值：1e-3 ~ 1e-4 对大多数场景有效。
         // 更高级方法：使用 ray epsilon based on geometry scale（根据场景大小动态调整）。
         Vec3f shadow_orig = light_dir * N < 0 ? point - N * 1e-3 : point + N * 1e-3; // 检查该点是否light[i]在阴影下面
-        Vec3f shadow_pt, shadow_N;                                                       // 阴影射线（阴影点到）与球体的交点，阴影法向量
-        Material tmpmaterial;                                                            // 材质
+        Vec3f shadow_pt, shadow_N;                                                   // 阴影射线（阴影点到）与球体的交点，阴影法向量
+        Material tmpmaterial;                                                        // 材质
         // 阴影点位置向量shadow_orig，从point点到光源的光线方向向量light_dir，计算交点，有交点且点不在光源背后（到交点小于光线的模），即为阴影点
         if (scene_intersect(shadow_orig, light_dir, spheres, shadow_pt, shadow_N, tmpmaterial) && (shadow_pt - shadow_orig).norm() < light_distance)
-            continue;//存在阴影则直接跳过漫反射与镜面高光的计算，环境光放入漫反射中
+            continue;                                                                                                                     // 存在阴影则直接跳过漫反射与镜面高光的计算，环境光放入漫反射中
         diffuse_light_intensity += lights[i].intensity * std::max(0.f, light_dir * N);                                                    // 光照强度乘以入射光向量与法向向量的内积=漫反射强度
         specular_light_intensity += powf(std::max(0.f, -reflect(-light_dir, N) * dir), material.specular_exponent) * lights[i].intensity; // 反射光与相机射线点乘的specular_exponent的幂乘以光强
     }
-    // 光线的漫反射强度（材质漫反射颜色乘以入射光向量与法向向量点乘结果）+镜面高光（白色光乘以镜面光强）,albedo反照率，[0]漫反射，[1]镜面
-    return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.) * specular_light_intensity * material.albedo[1];
+    // 光线的漫反射强度（材质漫反射颜色乘以入射光向量与法向向量点乘结果）+镜面高光（白色光乘以镜面光强）,+反射光（反射颜色×反照率），albedo反照率，[0]漫反射，[1]镜面,[2]反射
+    return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.) * specular_light_intensity * material.albedo[1] + reflect_color * material.albedo[2];
 }
 // 渲染函数
 void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights)
@@ -263,14 +268,15 @@ int main()
 {
     // 场景设置
     // 材质类型
-    Material ivory(Vec2f(0.6, 0.3), Vec3f(0.4, 0.4, 0.3), 50.);
-    Material red_rubber(Vec2f(0.9, 0.1), Vec3f(0.3, 0.1, 0.1), 10.);
+    Material ivory(Vec3f(0.6, 0.3, 0.1), Vec3f(0.4, 0.4, 0.3), 50.);//有微弱反射
+    Material red_rubber(Vec3f(0.9, 0.1, 0.0), Vec3f(0.3, 0.1, 0.1), 10.);//无反射
+    Material mirror(Vec3f(0.0, 10.0, 0.8), Vec3f(1.0, 1.0, 1.0), 1425.);//镜面高光幂指数大，漫反射白光强度也大，且反射率也大
     // 场景球体组合
     std::vector<Sphere> spheres;
-    spheres.push_back(Sphere(Vec3f(-3, 0, -16), 2, ivory));
-    spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2, red_rubber));
-    spheres.push_back(Sphere(Vec3f(1.5, -0.5, -18), 3, red_rubber));
-    spheres.push_back(Sphere(Vec3f(7, 5, -18), 4, ivory));
+    spheres.push_back(Sphere(Vec3f(-3,    0,   -16), 2,      ivory));
+    spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2,      mirror));
+    spheres.push_back(Sphere(Vec3f( 1.5, -0.5, -18), 3, red_rubber));
+    spheres.push_back(Sphere(Vec3f( 7,    5,   -18), 4,     mirror));
     // 光线
     std::vector<Light> lights;
     lights.push_back(Light(Vec3f(-20, 20, 20), 1.5));
