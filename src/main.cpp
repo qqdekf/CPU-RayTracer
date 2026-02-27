@@ -45,7 +45,7 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const Sphere &sphere)
     }
     return Vec3f(0.4, 0.4, 0.3); // 相交为另外的颜色
 }
-//
+//渲染球体
 void render(const Sphere &sphere)
 {
     // 图像像数
@@ -53,23 +53,19 @@ void render(const Sphere &sphere)
     const int height = 768;
     // 动态数组缓冲rgb颜色向量,像数数量为长乘宽
     std::vector<Vec3f> framebuffer(width * height);
+    // field of view 视场角度
+    const int fov = M_PI / 2.;
     // 缓冲写入数据
     for (size_t j = 0; j < height; j++)
     {
         for (size_t i = 0; i < width; i++)
         {
-            // 一维数组模拟矩阵输入rgb分量
-            framebuffer[i + j * width] = Vec3f(j / float(height), i / float(width), 0.5f);
-        }
-    }
-    for (size_t j = 0; j < height; j++)
-    {
-        for (size_t i = 0; i < width; i++)
-        {
-            float x = (2 * (i + 0.5) / (float)width - 1) * tan(fov / 2.) * width / (float)height;
-            float y = -(2 * (j + 0.5) / (float)height - 1) * tan(fov / 2.);
-            Vec3f dir = Vec3f(x, y, -1).normalize();
-            framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, sphere);
+            // 世界坐标转化为相机坐标（屏幕坐标）
+            //一个像素等于一个单位距离，像素中心为像素点的位置，遍历方向向量求解每个像素的颜色。
+            float x = (2 * (i + 0.5) / (float)width - 1) * tan(fov / 2.)* width / (float)height;  // 标准化成1x1x1的立方体，高度为单位长度，需要乘以宽高比
+            float y = -(2 * (j + 0.5) / (float)height - 1) * tan(fov / 2.);                       // 以高度为单位长度，相当于乘以height.屏幕空间y轴向下，取负值
+            Vec3f dir = Vec3f(x, y, -1).normalize();                                              // 相机方向向量，-1为屏幕所在位置，标准化方向向量
+            framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, sphere);                   // 原点作为相机坐标，求球体射线相交
         }
     }
     std::ofstream ofs("out.ppm", std::ios::binary);
@@ -147,8 +143,10 @@ void render()
 /// @return
 int main()
 {
+    //放置球体到世界空间中
+    Sphere oneSphere(Vec3f(-3, 0, -16), 2);
     // 渲染函数
-    render();
+    render(oneSphere);
 
     return 0;
 }
