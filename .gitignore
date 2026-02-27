@@ -1,0 +1,13 @@
+.vscode/
+build/
+lib/
+data/
+bin/
+*.dll
+*.lib
+*.so
+*.a
+*.exe
+*.txt
+!CMakeLists.txt
+*.json
