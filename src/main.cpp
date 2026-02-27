@@ -68,20 +68,25 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
     }
     return spheres_dist < 1000;
 }
-// orig为视点，dir为方向，spheres球体数组
-Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres)
+// 片段颜色计算函数，orig为视点，dir为方向，spheres球体数组
+Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights) 
 {
-    Vec3f point, N;
+    Vec3f point, N;//交点与法向量
     Material material;
   
     if (!scene_intersect(orig, dir, spheres, point, N, material))
     {
         return Vec3f(0.2, 0.7, 0.8); // background color
     }
-    return material.diffuse_color; // 相交返回材质颜色
+    float diffuse_light_intensity = 0;
+    for (size_t i=0; i<lights.size(); i++) {
+        Vec3f light_dir      = (lights[i].position - point).normalize();//入射光方向向量
+        diffuse_light_intensity  += lights[i].intensity * std::max(0.f, light_dir*N);//光照强度乘以入射光向量与法向向量的内积=漫反射强度
+    }
+    return material.diffuse_color * diffuse_light_intensity;//光线的漫反射强度（材质颜色乘以入射光向量与法向向量点乘结果）
 }
-//
-void render(const std::vector<Sphere> &spheres)
+//渲染函数
+void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights) 
 {
     // 图像像数
     const int width = 1024;
@@ -102,7 +107,7 @@ void render(const std::vector<Sphere> &spheres)
             float x = (2 * (i + 0.5) / (float)width - 1) * tan(fov / 2.) * width / (float)height; // 标准化成1x1x1的立方体，需要乘以宽高比
             float y = -(2 * (j + 0.5) / (float)height - 1) * tan(fov / 2.);                       // 高度为单位长度进行缩放，屏幕空间y轴向下，取负值
             Vec3f dir = Vec3f(x, y, -1).normalize();                                              // 相机方向向量，-1为屏幕所在位置，标准化方向向量
-            framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, spheres);                  // 原点作为相机坐标，求球体射线相交
+            framebuffer[i+j*width] = cast_ray(Vec3f(0,0,0), dir, spheres, lights);                 // 原点作为相机坐标，求球体射线相交
         }
     }
     std::ofstream ofs("out.ppm", std::ios::binary);
@@ -189,9 +194,12 @@ int main()
     spheres.push_back(Sphere(Vec3f(-3, 0, -16), 2, ivory));
     spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2, red_rubber));
     spheres.push_back(Sphere(Vec3f(1.5, -0.5, -18), 3, red_rubber));
-    spheres.push_back(Sphere(Vec3f(7, 5, -18), 4, ivory));
+    spheres.push_back(Sphere(Vec3f(7, 5, -18), 4, ivory));  
+    //光线
+    std::vector<Light>  lights;
+    lights.push_back(Light(Vec3f(-20, 20,  20), 1.5));
     // 渲染函数
-    render(spheres);
+    render(spheres, lights);
 
     return 0;
 }
