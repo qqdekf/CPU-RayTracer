@@ -6,13 +6,28 @@
 #include "geometry.h"
 #include <algorithm>
 
+//光源
+struct Light {
+    Light(const Vec3f &p, const float &i) : position(p), intensity(i) {}
+    Vec3f position;//光源位置
+    float intensity;//光源强度
+};
+// 材质
+struct Material
+{
+    Material(const Vec3f &color) : diffuse_color(color) {}
+    Material() : diffuse_color() {}
+    Vec3f diffuse_color; // 材质漫反射颜色
+};
+
 // 球体
 struct Sphere
 {
-    Vec3f center; // 球中心
-    float radius; // 半径
+    Vec3f center;      // 球中心
+    float radius;      // 半径
+    Material material; // 球体材质
     // 球体构造函数
-    Sphere(const Vec3f &c, const float &r) : center(c), radius(r) {}
+    Sphere(const Vec3f &c, const float &r, const Material &m) : center(c), radius(r), material(m) {}
     // 光线求交，分几种情况，起点在球体内外，方向在圆心正反方向，d与r的判别
     // orig为射线起点，dir为射线方向，t0为求解得到射线到球体的距离
     // 图解链接https://user-images.githubusercontent.com/26228275/52620952-0c88aa80-2ecc-11e9-8917-e7fc438e3536.png
@@ -35,18 +50,38 @@ struct Sphere
     }
 };
 
-// 设定颜色，orig为视点，dir为方向
-Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const Sphere &sphere)
+// 场景球体相交判断，orig为视点，dir为方向，spheres球体数组,hit为交点，N为交点指向球心的方向向量
+bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, Vec3f &hit, Vec3f &N, Material &material)
 {
-    float sphere_dist = std::numeric_limits<float>::max(); // 距离默认为最大浮点数
-    if (!sphere.ray_intersect(orig, dir, sphere_dist))
+    float spheres_dist = std::numeric_limits<float>::max(); // 相交点距离默认最大浮点数
+    for (size_t i = 0; i < spheres.size(); i++)
     {
-        return Vec3f(0.2, 0.7, 0.8); // 不相交为background color
+        float dist_i;
+        // 相交并且距离小于最大值
+        if (spheres[i].ray_intersect(orig, dir, dist_i) && dist_i < spheres_dist)
+        {
+            spheres_dist = dist_i;                     // 相交距离
+            hit = orig + dir * dist_i;                 // 相交点向量
+            N = (hit - spheres[i].center).normalize(); // 交点指向球心的方向向量
+            material = spheres[i].material;            // 材质赋值
+        }
     }
-    return Vec3f(0.4, 0.4, 0.3); // 相交为另外的颜色
+    return spheres_dist < 1000;
 }
-//渲染球体
-void render(const Sphere &sphere)
+// orig为视点，dir为方向，spheres球体数组
+Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres)
+{
+    Vec3f point, N;
+    Material material;
+  
+    if (!scene_intersect(orig, dir, spheres, point, N, material))
+    {
+        return Vec3f(0.2, 0.7, 0.8); // background color
+    }
+    return material.diffuse_color; // 相交返回材质颜色
+}
+//
+void render(const std::vector<Sphere> &spheres)
 {
     // 图像像数
     const int width = 1024;
@@ -61,11 +96,13 @@ void render(const Sphere &sphere)
         for (size_t i = 0; i < width; i++)
         {
             // 世界坐标转化为相机坐标（屏幕坐标）
-            //一个像素等于一个单位距离，像素中心为像素点的位置，遍历方向向量求解每个像素的颜色。
-            float x = (2 * (i + 0.5) / (float)width - 1) * tan(fov / 2.)* width / (float)height;  // 标准化成1x1x1的立方体，高度为单位长度，需要乘以宽高比
-            float y = -(2 * (j + 0.5) / (float)height - 1) * tan(fov / 2.);                       // 以高度为单位长度，相当于乘以height.屏幕空间y轴向下，取负值
+            // 定义一个单位距离即世界空间的距离（-1为屏幕所在位置），求得像素长度为2*tan(fov/2)/width，像素中心为像素点的位置，遍历方向向量求解每个像素的颜色
+            // 屏幕上的width个像素对应2 * tan(fov/2)个世界单位。因此，向量的顶点位于距离左边缘(i+0.5)/width * 2*tan(fov/2)个世界单位的位置
+            // 或者从屏幕与-z轴的交点起距离为(i+0.5)/width*2*tan(fov/2)-tan(fov/2)。将屏幕的宽高比加入计算中，你就会找到射线方向的精确公式
+            float x = (2 * (i + 0.5) / (float)width - 1) * tan(fov / 2.) * width / (float)height; // 标准化成1x1x1的立方体，需要乘以宽高比
+            float y = -(2 * (j + 0.5) / (float)height - 1) * tan(fov / 2.);                       // 高度为单位长度进行缩放，屏幕空间y轴向下，取负值
             Vec3f dir = Vec3f(x, y, -1).normalize();                                              // 相机方向向量，-1为屏幕所在位置，标准化方向向量
-            framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, sphere);                   // 原点作为相机坐标，求球体射线相交
+            framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, spheres);                  // 原点作为相机坐标，求球体射线相交
         }
     }
     std::ofstream ofs("out.ppm", std::ios::binary);
@@ -143,10 +180,18 @@ void render()
 /// @return
 int main()
 {
-    //放置球体到世界空间中
-    Sphere oneSphere(Vec3f(-3, 0, -16), 2);
+    // 场景设置
+    // 材质类型
+    Material ivory(Vec3f(0.4, 0.4, 0.3));
+    Material red_rubber(Vec3f(0.3, 0.1, 0.1));
+    // 场景球体组合
+    std::vector<Sphere> spheres;
+    spheres.push_back(Sphere(Vec3f(-3, 0, -16), 2, ivory));
+    spheres.push_back(Sphere(Vec3f(-1.0, -1.5, -12), 2, red_rubber));
+    spheres.push_back(Sphere(Vec3f(1.5, -0.5, -18), 3, red_rubber));
+    spheres.push_back(Sphere(Vec3f(7, 5, -18), 4, ivory));
     // 渲染函数
-    render(oneSphere);
+    render(spheres);
 
     return 0;
 }
