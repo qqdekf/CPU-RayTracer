@@ -1,6 +1,7 @@
 .vscode/
 build/
-lib/
+# lib/
+resource/
 data/
 bin/
 output/

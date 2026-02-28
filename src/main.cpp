@@ -6,6 +6,14 @@
 #include "geometry.h"
 #include <algorithm>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+// 环境贴图
+int envmap_width, envmap_height;
+std::vector<Vec3f> envmap;
+
 // 光源
 struct Light
 {
@@ -81,23 +89,47 @@ Vec3f refract(const Vec3f &I, const Vec3f &N, const float &refractive_index)
     return k < 0 ? Vec3f(0, 0, 0) : I * eta + n * (eta * cosi - sqrtf(k)); // k<0为全反射，无折射光，返回零向量（调用者需处理，如转为反射）。否则按公式计算折射方向。
     // return normalize(T); // 返回单位向量（重要！）
 }
-// 场景球体相交判断，orig为视点，dir为方向，spheres球体数组,hit为交点，N为交点指向球心的方向向量
+// 场景球体相机射线相交判断，orig为视点，dir为方向，spheres球体数组,hit为交点，N为交点指向球心的方向向量
 bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, Vec3f &hit, Vec3f &N, Material &material)
 {
     float spheres_dist = std::numeric_limits<float>::max(); // 相交点距离默认最大浮点数
     for (size_t i = 0; i < spheres.size(); i++)
     {
         float dist_i;
-        // 相交并且距离小于最大值
+        // 相交并且距离小于最大值（距离无穷远）
         if (spheres[i].ray_intersect(orig, dir, dist_i) && dist_i < spheres_dist)
         {
             spheres_dist = dist_i;                     // 相交距离
-            hit = orig + dir * dist_i;                 // 相交点向量
+            hit = orig + dir * dist_i;                 // 相交点位置向量
             N = (hit - spheres[i].center).normalize(); // 交点指向球心的方向向量
             material = spheres[i].material;            // 材质赋值
         }
     }
-    return spheres_dist < 1000;
+    // 棋盘格
+    //  float checkerboard_dist = 1000.0f; // 与 return 条件对齐
+    float checkerboard_dist = std::numeric_limits<float>::max(); // 检测边界距离
+    if (fabs(dir.y) > 1e-3)                                      // 绝对值判断，避免除零（光线不平行于地面）
+    {
+        float d = -(orig.y + 4) / dir.y; // 棋盘格地面（checkerboard plane） y = -4，射线与平面 y=-4 的交点参数 d
+        Vec3f pt = orig + dir * d;       // 平面方程：y = -4 → 标准形式：0*x + 1*y + 0*z + 4 = 0
+        // 光线：P(d) = orig + d * dir
+        // 代入：orig.y + t * dir.y = -4 → d = (-4 - orig.y) / dir.y
+        // 检查交点是否在有效区：x:[-10,10],z：[-30,-10],d>0方向向前，小于球体的相机射线交点距离（被球体遮住，避免渲染遮挡的棋盘格）
+        if (d > 0 && fabs(pt.x) < 10 && pt.z < -10 && pt.z > -30 && d < spheres_dist)
+        {
+            checkerboard_dist = d; // 参数t
+            hit = pt;              // 交点方程
+            N = Vec3f(0, 1, 0);    // 定义地面法线向上
+            // 棋盘格着色：根据（x,z)坐奇偶交替着色
+            //hit.x 和 hit.z 可能很大（虽然被 fabs(pt.x)<10 限制了 x，但 z 在 -30~-10）。
+            // 0.5 * hit.x + 1000 → 在 x ∈ [-10,10] 时，结果 ∈ [995, 1005]
+            // 0.5 * hit.z → z ∈ [-30,-10] → 结果 ∈ [-15, -5] → int(-15) = -15
+            // 所以 (995~1005) + (-15~-5) = 980~1000，按位与 &1 能正常判断奇偶。
+            material.diffuse_color = (int(.5 * hit.x + 1000) + int(.5 * hit.z)) & 1 ? Vec3f(1, 1, 1) : Vec3f(1, .7, .3);
+            material.diffuse_color = material.diffuse_color * .3;
+        }
+    }
+    return std::min(spheres_dist, checkerboard_dist) < 1000;//
 }
 // 片段颜色计算函数，orig为相机位置或者射线出发点，dir为相机射线方向，spheres球体数组,depth递归深度
 Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights, size_t depth = 0)
@@ -107,7 +139,14 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
     // 如果递归深度大于四或射线不相交，设置递归深度为4
     if (depth > 4 || !scene_intersect(orig, dir, spheres, point, N, material))
     {
-        return Vec3f(0.2, 0.7, 0.8); // background color
+        // 将射线方向 dir 映射到球面经纬度坐标（球面图形）
+        // phi = atan2(z, x) ∈ [-π, π] → u = (phi/(2π) + 0.5) ∈ [0,1]
+        int a = std::max(0, std::min(envmap_width - 1,
+                                     static_cast<int>((atan2(dir.z, dir.x) / (2 * M_PI) + 0.5) * envmap_width)));
+        // theta = acos(y) ∈ [0, π] → v = theta/π ∈ [0,1]
+        int b = std::max(0, std::min(envmap_height - 1,
+                                     static_cast<int>(acos(dir.y) / M_PI * envmap_height)));
+        return envmap[a + b * envmap_width]; // 采样环境贴图作为背景
     }
     // 反射
     Vec3f reflect_dir = reflect(dir, N).normalize();                                       // 反射光线
@@ -180,7 +219,7 @@ void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights
             framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, spheres, lights);          // 原点作为相机坐标，求球体射线相交
         }
     }
-    std::ofstream ofs("output/out.ppm", std::ios::binary);
+    std::ofstream ofs("../output/out.ppm", std::ios::binary);
     // 检查是否打开成功
     if (!ofs.is_open())
     {
@@ -291,6 +330,23 @@ void render()
 /// @return
 int main()
 {
+    int n = -1; // 图像通道数量
+    unsigned char *pixmap = stbi_load("../resource/envmap.jpg", &envmap_width, &envmap_height, &n, 0);
+    if (!pixmap || 3 != n) // 检查通道数是否为三和指针是否存在
+    {
+        std::cerr << "Error: can not load the environment map" << std::endl;
+        return -1;
+    }
+    envmap = std::vector<Vec3f>(envmap_width * envmap_height);
+    for (int j = envmap_height - 1; j >= 0; j--) // 图形y轴向下是负数
+    {
+        for (int i = 0; i < envmap_width; i++)
+        {
+            // 加载图像到数组中
+            envmap[i + j * envmap_width] = Vec3f(pixmap[(i + j * envmap_width) * 3 + 0], pixmap[(i + j * envmap_width) * 3 + 1], pixmap[(i + j * envmap_width) * 3 + 2]) * (1 / 255.);
+        }
+    }
+    stbi_image_free(pixmap); // 释放图像空间
     // 场景设置
     // 材质类型
     Material ivory(1.0, Vec4f(0.6, 0.3, 0.1, 0.0), Vec3f(0.4, 0.4, 0.3), 50.);      // 有微弱反射，无折射

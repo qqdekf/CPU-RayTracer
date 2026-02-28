@@ -33,5 +33,9 @@ include_directories(${PROJECT_SOURCE_DIR}/include)
 
 # 创建可执行文件
 add_executable(${PROJECT_NAME} ${SOURCES} ${HEADERS})
+
+# 链接库文件
+target_include_directories(${PROJECT_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/lib)
+
 # 可执行文件输出地址
 set(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/bin)
