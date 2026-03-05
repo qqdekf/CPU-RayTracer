@@ -3,16 +3,29 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include "geometry.h"
 #include <algorithm>
+
+#include "geometry.h"
+#include "model.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
 // 环境贴图
 int envmap_width, envmap_height;
 std::vector<Vec3f> envmap;
+
+// 加载模型
+Model duck("../resource/duck.obj");
+//AABB包围盒
+Vec3f min, max;
+// // 深度缓冲
+// //  图像像数
+// const int scr_width = 1024;
+// const int scr_height = 768;
+// double z_buffer[scr_width][scr_height] = {std::numeric_limits<double>::max()}; // 全部初始化为最大值
 
 // 光源
 struct Light
@@ -89,25 +102,65 @@ Vec3f refract(const Vec3f &I, const Vec3f &N, const float &refractive_index)
     return k < 0 ? Vec3f(0, 0, 0) : I * eta + n * (eta * cosi - sqrtf(k)); // k<0为全反射，无折射光，返回零向量（调用者需处理，如转为反射）。否则按公式计算折射方向。
     // return normalize(T); // 返回单位向量（重要！）
 }
-// 场景球体相机射线相交判断，orig为视点，dir为方向，spheres球体数组,hit为交点，N为交点指向球心的方向向量
-bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, Vec3f &hit, Vec3f &N, Material &material)
+
+// 光线追踪aabb判断相交函数
+bool intersect(const Vec3f &orig, const Vec3f &dir, Vec3f &min, Vec3f &max, float t_min, float t_max)
 {
-    float spheres_dist = std::numeric_limits<float>::max(); // 相交点距离默认最大浮点数
+    for (int i = 0; i < 3; i++)
+    {
+        float invD = 1.0f / dir[i];
+        float t0 = (min[i] - orig[i]) * invD;
+        float t1 = (max[i] - orig[i]) * invD;
+        if (invD < 0)
+            std::swap(t0, t1);
+        t_min = std::max(t_min, t0);
+        t_max = std::min(t_max, t1);
+        if (t_max <= t_min)
+            return false;
+    }
+    return true;
+}
+
+// 场景相机射线相交判断，orig为视点，dir为方向，spheres球体数组,返回hit为交点，N为交点指向球心的方向向量
+bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, Vec3f &hit, Vec3f &N, Material &material, Model &model,Vec3f &min, Vec3f &max)
+{
+    float dist=std::numeric_limits<float>::max();// 相交点距离初始化默认最大浮点数，不用设置深度缓冲
+    // float spheres_dist = std::numeric_limits<float>::max(); // 相交点距离默认最大浮点数
     for (size_t i = 0; i < spheres.size(); i++)
     {
         float dist_i;
         // 相交并且距离小于最大值（距离无穷远）
-        if (spheres[i].ray_intersect(orig, dir, dist_i) && dist_i < spheres_dist)
+        if (spheres[i].ray_intersect(orig, dir, dist_i) && dist_i < dist)
         {
-            spheres_dist = dist_i;                     // 相交距离
+            dist = dist_i;                     // 相交距离
             hit = orig + dir * dist_i;                 // 相交点位置向量
-            N = (hit - spheres[i].center).normalize(); // 交点指向球心的方向向量
+            N = (hit - spheres[i].center).normalize(); // 法向量：交点指向球心的方向向量
             material = spheres[i].material;            // 材质赋值
         }
     }
+    // 模型加载
+    float tmax = std::numeric_limits<float>::max();
+    // float model_dist = std::numeric_limits<float>::max(); // 相交点距离默认最大浮点数
+    // std::cout<<"qian:"<<++num0<<std::endl;
+    if (intersect(orig, dir, min, max, 0.0f, tmax))
+    {
+        for (size_t i = 0; i < duck.nfaces(); i++)
+        {
+            float dist_i;
+            // 相交并且距离小于最大值（距离无穷远）
+            if (duck.ray_triangle_intersect(i, orig, dir, dist_i, N) && dist_i < dist)
+            {
+                dist = dist_i;                              // 相交距离
+                hit = orig + dir * dist;                    // 相交点位置向量
+                N = N.normalize();                                // 法向量单位化
+                material=Material(1.0, Vec4f(0.9, 0.1, 0.0, 0.0), Vec3f(0.3, 0.1, 0.1), 10.); // 材质赋值
+            }
+        }
+    }
+
     // 棋盘格
     //  float checkerboard_dist = 1000.0f; // 与 return 条件对齐
-    float checkerboard_dist = std::numeric_limits<float>::max(); // 检测边界距离
+    // float checkerboard_dist = std::numeric_limits<float>::max(); // 检测边界距离
     if (fabs(dir.y) > 1e-3)                                      // 绝对值判断，避免除零（光线不平行于地面）
     {
         float d = -(orig.y + 4) / dir.y; // 棋盘格地面（checkerboard plane） y = -4，射线与平面 y=-4 的交点参数 d
@@ -115,13 +168,13 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
         // 光线：P(d) = orig + d * dir
         // 代入：orig.y + t * dir.y = -4 → d = (-4 - orig.y) / dir.y
         // 检查交点是否在有效区：x:[-10,10],z：[-30,-10],d>0方向向前，小于球体的相机射线交点距离（被球体遮住，避免渲染遮挡的棋盘格）
-        if (d > 0 && fabs(pt.x) < 10 && pt.z < -10 && pt.z > -30 && d < spheres_dist)
+        if (d > 0 && fabs(pt.x) < 10 && pt.z < -10 && pt.z > -30 && d < dist)
         {
-            checkerboard_dist = d; // 参数t
+            dist = d; // 参数t
             hit = pt;              // 交点方程
             N = Vec3f(0, 1, 0);    // 定义地面法线向上
             // 棋盘格着色：根据（x,z)坐奇偶交替着色
-            //hit.x 和 hit.z 可能很大（虽然被 fabs(pt.x)<10 限制了 x，但 z 在 -30~-10）。
+            // hit.x 和 hit.z 可能很大（虽然被 fabs(pt.x)<10 限制了 x，但 z 在 -30~-10）。
             // 0.5 * hit.x + 1000 → 在 x ∈ [-10,10] 时，结果 ∈ [995, 1005]
             // 0.5 * hit.z → z ∈ [-30,-10] → 结果 ∈ [-15, -5] → int(-15) = -15
             // 所以 (995~1005) + (-15~-5) = 980~1000，按位与 &1 能正常判断奇偶。
@@ -129,21 +182,21 @@ bool scene_intersect(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphe
             material.diffuse_color = material.diffuse_color * .3;
         }
     }
-    return std::min(spheres_dist, checkerboard_dist) < 1000;//
+    return dist < 1000; //
 }
-// 片段颜色计算函数，orig为相机位置或者射线出发点，dir为相机射线方向，spheres球体数组,depth递归深度
-Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights, size_t depth = 0)
+// 光线追踪算法实现片段颜色计算，orig为相机位置或者射线出发点，dir为相机射线方向，spheres球体数组,depth递归深度
+Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &spheres, const std::vector<Light> &lights, size_t depth = 0,Vec3f &min=min, Vec3f &max=max)
 {
     Vec3f point, N; // 交点与法向量
     Material material;
     // 如果递归深度大于四或射线不相交，设置递归深度为4
-    if (depth > 4 || !scene_intersect(orig, dir, spheres, point, N, material))
+    if (depth > 4 || !scene_intersect(orig, dir, spheres, point, N, material, duck,min, max))
     {
-        // 将射线方向 dir 映射到球面经纬度坐标（球面图形）
-        // phi = atan2(z, x) ∈ [-π, π] → u = (phi/(2π) + 0.5) ∈ [0,1]
+        // 将射线方向 dir 映射到球面经纬度坐标（球面图形）u为横坐标，v为纵坐标
+        // phi = atan2(z, x) ∈ [-π, π] → u = (phi/(2π) + 0.5) ∈ [0,1],返回的是从点 (0,0) 到点 (z,x) 的连线与 z 轴正方向之间的夹角，结果以弧度表示，范围在 [-π, π] 之间。
         int a = std::max(0, std::min(envmap_width - 1,
                                      static_cast<int>((atan2(dir.z, dir.x) / (2 * M_PI) + 0.5) * envmap_width)));
-        // theta = acos(y) ∈ [0, π] → v = theta/π ∈ [0,1]
+        // theta = acos(y) ∈ [0, π] → v = theta/π ∈ [0,1]，y值要求在[-1,1],y轴到xz平面的夹角
         int b = std::max(0, std::min(envmap_height - 1,
                                      static_cast<int>(acos(dir.y) / M_PI * envmap_height)));
         return envmap[a + b * envmap_width]; // 采样环境贴图作为背景
@@ -151,11 +204,11 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
     // 反射
     Vec3f reflect_dir = reflect(dir, N).normalize();                                       // 反射光线
     Vec3f reflect_orig = reflect_dir * N < 0 ? point - N * 1e-3 : point + N * 1e-3;        // 偏移量避免自交
-    Vec3f reflect_color = cast_ray(reflect_orig, reflect_dir, spheres, lights, depth + 1); // 递归计算片段颜色，递归深度关系反射强度
+    Vec3f reflect_color = cast_ray(reflect_orig, reflect_dir, spheres, lights, depth + 1,min,max); // 递归计算片段颜色，递归深度关系反射强度
     // 折射
     Vec3f refract_dir = refract(dir, N, material.refractive_index).normalize();            // 计算折射光反向
     Vec3f refract_orig = refract_dir * N < 0 ? point - N * 1e-3 : point + N * 1e-3;        // 偏移量避免自交
-    Vec3f refract_color = cast_ray(refract_orig, refract_dir, spheres, lights, depth + 1); // 递归计算片段颜色，递归深度关系反射强度
+    Vec3f refract_color = cast_ray(refract_orig, refract_dir, spheres, lights, depth + 1,min,max); // 递归计算片段颜色，递归深度关系反射强度
 
     float diffuse_light_intensity = 0, specular_light_intensity = 0; // 设置漫反射与镜面反射光照强度
     for (size_t i = 0; i < lights.size(); i++)
@@ -186,7 +239,7 @@ Vec3f cast_ray(const Vec3f &orig, const Vec3f &dir, const std::vector<Sphere> &s
         Vec3f shadow_pt, shadow_N;                                                   // 阴影射线（阴影点到）与球体的交点，阴影法向量
         Material tmpmaterial;                                                        // 材质
         // 阴影点位置向量shadow_orig，从point点到光源的光线方向向量light_dir，计算交点，有交点且点不在光源背后（到交点小于光线的模），即为阴影点
-        if (scene_intersect(shadow_orig, light_dir, spheres, shadow_pt, shadow_N, tmpmaterial) && (shadow_pt - shadow_orig).norm() < light_distance)
+        if (scene_intersect(shadow_orig, light_dir, spheres, shadow_pt, shadow_N, tmpmaterial, duck,min, max) && (shadow_pt - shadow_orig).norm() < light_distance)
             continue;                                                                                                                     // 存在阴影则直接跳过漫反射与镜面高光的计算，环境光放入漫反射中
         diffuse_light_intensity += lights[i].intensity * std::max(0.f, light_dir * N);                                                    // 光照强度乘以入射光向量与法向向量的内积=漫反射强度
         specular_light_intensity += powf(std::max(0.f, -reflect(-light_dir, N) * dir), material.specular_exponent) * lights[i].intensity; // 反射光与相机射线点乘的specular_exponent的幂乘以光强
@@ -204,7 +257,9 @@ void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights
     std::vector<Vec3f> framebuffer(width * height);
     // field of view 视场角度
     const int fov = M_PI / 2.;
-    // 缓冲写入数据
+    // 获取包围盒
+    duck.get_bbox(min, max);
+    // 缓冲写入数据，设置相机空间到屏幕空间
     for (size_t j = 0; j < height; j++)
     {
         for (size_t i = 0; i < width; i++)
@@ -216,7 +271,7 @@ void render(const std::vector<Sphere> &spheres, const std::vector<Light> &lights
             float x = (2 * (i + 0.5) / (float)width - 1) * tan(fov / 2.) * width / (float)height; // 标准化成1x1x1的立方体，需要乘以宽高比
             float y = -(2 * (j + 0.5) / (float)height - 1) * tan(fov / 2.);                       // 高度为单位长度进行缩放，屏幕空间y轴向下，取负值
             Vec3f dir = Vec3f(x, y, -1).normalize();                                              // 相机方向向量，-1为屏幕所在位置，标准化方向向量
-            framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, spheres, lights);          // 原点作为相机坐标，求球体射线相交
+            framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), dir, spheres, lights,0,min,max);          // 原点作为相机坐标，求球体射线相交
         }
     }
     std::ofstream ofs("../output/out.ppm", std::ios::binary);
@@ -364,8 +419,10 @@ int main()
     lights.push_back(Light(Vec3f(-20, 20, 20), 1.5));
     lights.push_back(Light(Vec3f(30, 50, -25), 1.8));
     lights.push_back(Light(Vec3f(30, 20, 30), 1.7));
+    // 移动模型
+
     // 渲染函数
     render(spheres, lights);
-
+    std::cout << "end" << std::endl;
     return 0;
 }

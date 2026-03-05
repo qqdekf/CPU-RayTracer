@@ -80,6 +80,22 @@ template<size_t DIM,typename T>vec<DIM,T> operator-(vec<DIM,T> lhs, const vec<DI
     return lhs;
 }
 
+template<size_t DIM,typename T> bool operator<(const vec<DIM,T>& lhs, const vec<DIM,T>& rhs) {
+    for (size_t i = 0; i < DIM; i++)
+    {
+        if(lhs[i]>rhs[i])  return false;
+    }
+    return true;
+}
+
+template<size_t DIM,typename T> bool operator>(const vec<DIM,T>& lhs, const vec<DIM,T>& rhs) {
+    for (size_t i = 0; i < DIM; i++)
+    {
+        if(lhs[i]<rhs[i])  return false;
+    }
+    return true;
+}
+
 //标量点乘向量
 template<size_t DIM,typename T,typename U> vec<DIM,T> operator*(const vec<DIM,T> &lhs, const U& rhs) {
     vec<DIM,T> ret;
